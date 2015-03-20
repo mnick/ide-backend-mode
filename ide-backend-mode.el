@@ -18,7 +18,13 @@
 
 ;;; Code:
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Imports
+
 (require 'haskell-cabal)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Modes
 
 (define-minor-mode ide-backend-mode
   "A minor mode enabling various features based on ide-backend."
@@ -29,6 +35,9 @@
 (define-derived-mode inferior-ide-backend-mode comint-mode "Inferior-IDE"
   "Major mode for interacting with an inferior ide-backend-client
 process.")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Customization
 
 (defgroup ide-backend-mode nil
   "IDE backend support for Haskell."
@@ -53,6 +62,9 @@ the minor mode when it is started, but can be overriden."
   :type 'string
   :group 'ide-backend-mode)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interactive functions
+
 (defun ide-backend-mode-start ()
   "Start an inferior process and buffer."
   (interactive)
@@ -67,6 +79,9 @@ the minor mode when it is started, but can be overriden."
      "--package-db" ide-backend-mode-package-db
      "empty")
     (inferior-ide-backend-mode)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Project functions
 
 (defun ide-backend-mode-buffer ()
   "The inferior buffer."
