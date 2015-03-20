@@ -33,7 +33,7 @@
   :keymap (let ((map (make-sparse-keymap)))
             map))
 
-(define-derived-mode inferior-ide-backend-mode comint-mode "Inferior-IDE"
+(define-derived-mode inferior-ide-backend-mode javascript-mode "Inferior-IDE"
   "Major mode for interacting with an inferior ide-backend-client
 process.")
 
@@ -70,24 +70,73 @@ the minor mode when it is started, but can be overriden."
   "Start an inferior process and buffer."
   (interactive)
   (with-current-buffer (ide-backend-mode-buffer)
+    (setq buffer-read-only t)
     (cl-assert (not (comint-check-proc (current-buffer))) nil
                "This buffer (%s) already has a running process."
                (buffer-name (current-buffer)))
     (cl-assert ide-backend-mode-package-db nil
                "The package database has not been set!")
     (cd (ide-backend-mode-dir))
-    (make-comint-in-buffer
-     (ide-backend-mode-name)
-     (ide-backend-mode-buffer)
-     ide-backend-mode-proc-path
-     nil
-     "--path" ide-backend-mode-paths
-     "--package-db" ide-backend-mode-package-db
-     "empty")
+    (let ((process (start-process (ide-backend-mode-process-name)
+                                  (ide-backend-mode-buffer)
+                                  ide-backend-mode-proc-path
+                                  "--path" ide-backend-mode-paths
+                                  "--package-db" ide-backend-mode-package-db
+                                  "empty"))))
     (inferior-ide-backend-mode)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Command queue
+
+(defvar ide-backend-mode-queue nil
+  "Command queue.")
+(make-variable-buffer-local 'ide-backend-mode-queue)
+
+(defun ide-backend-mode-queue ()
+  "Get the command queue."
+  (or ide-backend-mode-queue
+      (setq ide-backend-mode-queue (tq-create (ide-backend-mode-process)))))
+
+(defun ide-backend-mode-enqueue-string (string data cont)
+  "Enqueue a raw STRING to the command queue, returning the
+result to CONT."
+  (let ((wait-for-others t))
+    (ide-backend-mode-log string)
+    (tq-enqueue (ide-backend-mode-queue)
+                string
+                "\n"
+                (cons cont data)
+                (lambda (cont-and-data reply)
+                  (ide-backend-mode-log reply)
+                  (funcall (car cont-and-data)
+                           (cdr cont-and-data)
+                           reply))
+                wait-for-others)))
+
+(defun ide-backend-mode-enqueue-cmd (cmd data cont)
+  "Enqueue a CMD to be encoded to JSON, returning DATA and the
+  result to CONT."
+  (ide-backend-mode-enqueue-string
+   (concat (json-encode cmd) "\n")
+   (cons cont data)
+   (lambda (cont-and-data reply)
+     (funcall (car cont-and-data)
+              (cdr cont-and-data)
+              (json-read-from-string reply)))))
+
+(defun ide-backend-mode-log (string)
+  "Log a string to the inferior buffer."
+  (with-current-buffer (ide-backend-mode-buffer)
+    (goto-char (point-max))
+    (let ((inhibit-read-only t))
+      (insert string))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Project functions
+
+(defun ide-backend-mode-process ()
+  "Get the current process."
+  (get-buffer-process (ide-backend-mode-buffer)))
 
 (defun ide-backend-mode-buffer ()
   "The inferior buffer."
