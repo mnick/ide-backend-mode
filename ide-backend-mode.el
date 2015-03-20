@@ -22,6 +22,7 @@
 ;; Imports
 
 (require 'haskell-cabal)
+(require 'cl-lib)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Modes
@@ -69,6 +70,11 @@ the minor mode when it is started, but can be overriden."
   "Start an inferior process and buffer."
   (interactive)
   (with-current-buffer (ide-backend-mode-buffer)
+    (cl-assert (not (comint-check-proc (current-buffer))) nil
+               "This buffer (%s) already has a running process."
+               (buffer-name (current-buffer)))
+    (cl-assert ide-backend-mode-package-db nil
+               "The package database has not been set!")
     (cd (ide-backend-mode-dir))
     (make-comint-in-buffer
      (ide-backend-mode-name)
