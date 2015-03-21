@@ -23,6 +23,7 @@
 
 (require 'haskell-cabal)
 (require 'cl-lib)
+(require 'fifo)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Modes
@@ -33,9 +34,12 @@
   :keymap (let ((map (make-sparse-keymap)))
             map))
 
-(define-derived-mode inferior-ide-backend-mode javascript-mode "Inferior-IDE"
+(define-derived-mode inferior-ide-backend-mode fundamental-mode "Inferior-IDE"
   "Major mode for interacting with an inferior ide-backend-client
 process.")
+
+(define-key inferior-ide-backend-mode-map (kbd "C-c C-c") 'ide-backend-mode-stop)
+(define-key inferior-ide-backend-mode-map (kbd "C-c C-k") 'ide-backend-mode-clear)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Customization
@@ -69,88 +73,153 @@ the minor mode when it is started, but can be overriden."
 (defun ide-backend-mode-start ()
   "Start an inferior process and buffer."
   (interactive)
+  (cl-assert (not (and (ide-backend-mode-process)
+                       (process-live-p (ide-backend-mode-process))))
+             nil "Process already running.")
+  (unless
+      (with-current-buffer (ide-backend-mode-buffer)
+        (setq buffer-read-only t)
+        (cl-assert ide-backend-mode-package-db nil
+                   "The package database has not been set!")
+        (cd (ide-backend-mode-dir))
+        (setq ide-backend-mode-queue (fifo-make))
+        (setq ide-backend-mode-current-command nil)
+        (setq ide-backend-mode-buffer "")
+        (let ((args (list ide-backend-mode-proc-path
+                          "--path" ide-backend-mode-paths
+                          "--package-db" ide-backend-mode-package-db
+                          "empty")))
+          (ide-backend-mode-log "Starting: %s\n"
+                                (mapconcat #'identity args " "))
+          (let ((process (start-process
+                          (ide-backend-mode-process-name)
+                          nil
+                          ide-backend-mode-proc-path
+                          "--path" ide-backend-mode-paths
+                          "--package-db" ide-backend-mode-package-db
+                          "empty")))
+            (set-process-sentinel process 'ide-backend-mode-sentinel)
+            (set-process-filter process 'ide-backend-mode-filter)))
+        (inferior-ide-backend-mode))))
+
+(defun ide-backend-mode-stop ()
+  "Stop the process."
+  (interactive)
   (with-current-buffer (ide-backend-mode-buffer)
-    (setq buffer-read-only t)
-    (cl-assert (not (comint-check-proc (current-buffer))) nil
-               "This buffer (%s) already has a running process."
-               (buffer-name (current-buffer)))
-    (cl-assert ide-backend-mode-package-db nil
-               "The package database has not been set!")
-    (cd (ide-backend-mode-dir))
-    (let ((process (start-process (ide-backend-mode-process-name)
-                                  (ide-backend-mode-buffer)
-                                  ide-backend-mode-proc-path
-                                  "--path" ide-backend-mode-paths
-                                  "--package-db" ide-backend-mode-package-db
-                                  "empty"))))
-    (inferior-ide-backend-mode)))
+    (when (ide-backend-mode-process)
+      (setq ide-backend-mode-current-command nil)
+      (setq ide-backend-mode-buffer "")
+      (kill-process (ide-backend-mode-process))
+      (delete-process (ide-backend-mode-process)))))
+
+(defun ide-backend-mode-restart ()
+  "Restart the process with a fresh command queue."
+  (interactive)
+  (ide-backend-mode-stop)
+  (ide-backend-mode-start))
+
+(defun ide-backend-mode-clear ()
+  "Clear the interaction buffer."
+  (interactive)
+  (let ((inhibit-read-only t))
+    (erase-buffer)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Process filters and sentinel
+
+(defun ide-backend-mode-filter (process response)
+  (with-current-buffer (ide-backend-mode-buffer (process-name process))
+    (if ide-backend-mode-current-command
+        (let* ((lines (split-string (concat ide-backend-mode-buffer response) "\n")))
+          (setq ide-backend-mode-buffer (car (last lines)))
+          (setq lines (butlast lines))
+          (let ((data (plist-get ide-backend-mode-current-command :data))
+                (cont (plist-get ide-backend-mode-current-command :cont)))
+            (while lines
+              (let ((line (pop lines)))
+                (ide-backend-mode-log
+                 "<- %s"
+                 (haskell-fontify-as-mode line 'javascript-mode))
+                (unless (condition-case e
+                            (funcall cont data (json-read-from-string line))
+                          (error (message "Haskell process command errored with: %S" e)
+                                 t))
+                  (cl-loop for line in lines
+                           do (ide-backend-mode-log
+                               "Extraneous lines after command completed: %s"
+                               (haskell-fontify-as-mode line 'javascript-mode)))
+                  (setq ide-backend-mode-current-command nil)
+                  (setq lines nil)
+                  (ide-backend-mode-queue-trigger))))))
+      (ide-backend-mode-log "No command handler for this data: %s"
+                            (haskell-fontify-as-mode response 'javascript-mode)))))
+
+(defun ide-backend-mode-sentinel (process event)
+  (with-current-buffer (ide-backend-mode-buffer (process-name process))
+    (ide-backend-mode-log "Process event: %s" event)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Command queue
+
+(defvar ide-backend-mode-current-command nil
+  "Current command handler.")
+(make-variable-buffer-local 'ide-backend-mode-current-command)
+
+(defvar ide-backend-mode-buffer ""
+  "A buffer for the process.")
+(make-variable-buffer-local 'ide-backend-mode-buffer)
 
 (defvar ide-backend-mode-queue nil
   "Command queue.")
 (make-variable-buffer-local 'ide-backend-mode-queue)
 
 (defun ide-backend-mode-queue ()
-  "Get the command queue."
+  "Get the FIFO queue of this process."
   (or ide-backend-mode-queue
-      (setq ide-backend-mode-queue (tq-create (ide-backend-mode-process)))))
+      (setq ide-backend-mode-queue (fifo-make))))
 
-(defun ide-backend-mode-enqueue-string (string data cont)
-  "Enqueue a raw STRING to the command queue, returning the
-result to CONT."
-  (let ((wait-for-others t))
-    (ide-backend-mode-log string)
-    (tq-enqueue (ide-backend-mode-queue)
-                string
-                "\n"
-                (cons cont data)
-                (lambda (cont-and-data reply)
-                  (ide-backend-mode-log reply)
-                  (funcall (car cont-and-data)
-                           (cdr cont-and-data)
-                           reply))
-                wait-for-others)))
+(defun ide-backend-mode-enqueue (json data cont)
+  "Enqueue a JSON command to the command queue, calling (CONT
+DATA line) for each response line until CONT returns nil."
+  (ide-backend-mode-log "-> %s" (haskell-fontify-as-mode (json-encode json) 'javascript-mode))
+  (fifo-push (ide-backend-mode-queue)
+             (list :json json :data data :cont cont))
+  (ide-backend-mode-queue-trigger))
 
-(defun ide-backend-mode-enqueue-cmd (cmd data cont)
-  "Enqueue a CMD to be encoded to JSON, returning DATA and the
-  result to CONT."
-  (ide-backend-mode-enqueue-string
-   (concat (json-encode cmd) "\n")
-   (cons cont data)
-   (lambda (cont-and-data reply)
-     (funcall (car cont-and-data)
-              (cdr cont-and-data)
-              (json-read-from-string reply)))))
-
-(defun ide-backend-mode-log (string)
-  "Log a string to the inferior buffer."
-  (with-current-buffer (ide-backend-mode-buffer)
-    (goto-char (point-max))
-    (let ((inhibit-read-only t))
-      (insert string))))
+(defun ide-backend-mode-queue-trigger ()
+  "Trigger the next command in the queue if there is no current
+command."
+  (unless ide-backend-mode-current-command
+    (unless (fifo-null-p (ide-backend-mode-queue))
+      (setq ide-backend-mode-current-command
+            (fifo-pop (ide-backend-mode-queue)))
+      (process-send-string
+       (ide-backend-mode-process)
+       (concat (json-encode (plist-get ide-backend-mode-current-command :json))
+               "\n")))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Project functions
 
 (defun ide-backend-mode-process ()
   "Get the current process."
-  (get-buffer-process (ide-backend-mode-buffer)))
+  (get-process (ide-backend-mode-process-name)))
 
-(defun ide-backend-mode-buffer ()
+(defun ide-backend-mode-buffer (&optional name)
   "The inferior buffer."
-  (get-buffer-create (ide-backend-mode-buffer-name)))
+  (get-buffer-create
+   (ide-backend-mode-buffer-name
+    (or name
+        (ide-backend-mode-name)))))
 
 (defun ide-backend-mode-process-name ()
   "Name for the inferior process."
-  (format "ide-backend:%s"
-          (ide-backend-mode-name)))
+  (ide-backend-mode-name))
 
-(defun ide-backend-mode-buffer-name ()
+(defun ide-backend-mode-buffer-name (name)
   "Name for the inferior buffer."
   (format "*ide-backend:%s*"
-          (ide-backend-mode-name)))
+          name))
 
 (defun ide-backend-mode-dir ()
   "The directory for the project."
@@ -162,5 +231,85 @@ directory."
   (let ((file (haskell-cabal-find-file)))
     (downcase (file-name-sans-extension
                (file-name-nondirectory file)))))
+
+(defun ide-backend-mode-log (&rest args)
+  "Log a string to the inferior buffer."
+  (with-current-buffer (ide-backend-mode-buffer)
+    (goto-char (point-max))
+    (let ((inhibit-read-only t))
+      (insert (apply #'format args)
+              "\n"))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Commands
+
+(defun ide-backend-mode-update-file (filepath)
+  (ide-backend-mode-enqueue
+   `((request . "updateSession")
+     (update . (,(ide-backend-mode-list->hashtable
+                  `((update . "updateSourceFileFromFile")
+                    (filePath . ,filepath))))))
+   nil
+   (lambda (_ reply)
+     (cond
+      ((assoc 'progress reply)
+       (let ((msg (cdr (assoc 'parsedMsg (assoc 'progress reply))))
+             (step (cdr (assoc 'step (assoc 'progress reply))))
+             (steps (cdr (assoc 'numSteps (assoc 'progress reply)))))
+         (message "%s %s"
+                  (propertize msg 'face 'bold)
+                  (propertize (format "(%d of %d)" step steps)
+                              'face 'font-lock-comment-face)))
+       t)
+      (t
+       (ide-backend-mode-enqueue
+        `((request . "getSourceErrors"))
+        nil
+        (lambda (_ reply)
+          (let ((any-errors nil)
+                (warnings 0))
+            (loop for item in (mapcar #'identity (cdr (assoc 'errors reply)))
+                  do (let* ((msg (cdr (assoc 'msg item)))
+                            (kind (cdr (assoc 'kind item)))
+                            (span (cdr (assoc 'span item)))
+                            (fp (cdr (assoc 'filePath span)))
+                            (sl (cdr (assoc 'fromLine span)))
+                            (sc (cdr (assoc 'fromColumn span)))
+                            (el (cdr (assoc 'toLine span)))
+                            (ec (cdr (assoc 'toColumn span))))
+                       (cond ((string= kind "error")
+                              (setq any-errors t))
+                             ((string= kind "warning")
+                              (setq warnings (1+ warnings))))
+                       (message "%s"
+                                (propertize
+                                 (format "%s:(%d,%d)-(%d,%d): \n%s"
+                                         fp sl sc el ec msg)
+                                 'face
+                                 (cond
+                                  ((string= kind "warning")
+                                   'compilation-warning)
+                                  ((string= kind "error")
+                                   'compilation-error)
+                                  (t nil))))))
+            (unless any-errors
+              (if (= 0 warnings)
+                  (message "OK.")
+                (message (propertize "OK (%d warning%s)." 'face 'compilation-warning)
+                         warnings
+                         (if (= 1 warnings) "" "s")))))
+          nil))
+       nil)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; JSON helpers
+
+(defun ide-backend-mode-list->hashtable (xs)
+  "Convert a list to a hashtable."
+  (let ((h (make-hash-table)))
+    (cl-loop for (key . val)
+             in xs
+             do (puthash key val h))
+    h))
 
 (provide 'ide-backend-mode)
