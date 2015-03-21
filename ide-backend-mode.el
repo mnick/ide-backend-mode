@@ -76,31 +76,30 @@ the minor mode when it is started, but can be overriden."
   (cl-assert (not (and (ide-backend-mode-process)
                        (process-live-p (ide-backend-mode-process))))
              nil "Process already running.")
-  (unless
-      (with-current-buffer (ide-backend-mode-buffer)
-        (setq buffer-read-only t)
-        (cl-assert ide-backend-mode-package-db nil
-                   "The package database has not been set!")
-        (cd (ide-backend-mode-dir))
-        (setq ide-backend-mode-queue (fifo-make))
-        (setq ide-backend-mode-current-command nil)
-        (setq ide-backend-mode-buffer "")
-        (let ((args (list ide-backend-mode-proc-path
-                          "--path" ide-backend-mode-paths
-                          "--package-db" ide-backend-mode-package-db
-                          "empty")))
-          (ide-backend-mode-log "Starting: %s\n"
-                                (mapconcat #'identity args " "))
-          (let ((process (start-process
-                          (ide-backend-mode-process-name)
-                          nil
-                          ide-backend-mode-proc-path
-                          "--path" ide-backend-mode-paths
-                          "--package-db" ide-backend-mode-package-db
-                          "empty")))
-            (set-process-sentinel process 'ide-backend-mode-sentinel)
-            (set-process-filter process 'ide-backend-mode-filter)))
-        (inferior-ide-backend-mode))))
+  (with-current-buffer (ide-backend-mode-buffer)
+    (setq buffer-read-only t)
+    (cl-assert ide-backend-mode-package-db nil
+               "The package database has not been set!")
+    (cd (ide-backend-mode-dir))
+    (setq ide-backend-mode-queue (fifo-make))
+    (setq ide-backend-mode-current-command nil)
+    (setq ide-backend-mode-buffer "")
+    (let ((args (list ide-backend-mode-proc-path
+                      "--path" ide-backend-mode-paths
+                      "--package-db" ide-backend-mode-package-db
+                      "empty")))
+      (ide-backend-mode-log "Starting: %s\n"
+                            (mapconcat #'identity args " "))
+      (let ((process (start-process
+                      (ide-backend-mode-process-name)
+                      nil
+                      ide-backend-mode-proc-path
+                      "--path" ide-backend-mode-paths
+                      "--package-db" ide-backend-mode-package-db
+                      "empty")))
+        (set-process-sentinel process 'ide-backend-mode-sentinel)
+        (set-process-filter process 'ide-backend-mode-filter)))
+    (inferior-ide-backend-mode)))
 
 (defun ide-backend-mode-stop ()
   "Stop the process."
@@ -123,6 +122,15 @@ the minor mode when it is started, but can be overriden."
   (interactive)
   (let ((inhibit-read-only t))
     (erase-buffer)))
+
+(defun ide-backend-mode-load ()
+  "Load the current buffer's file."
+  (interactive)
+  (save-buffer)
+  (let ((filename (buffer-file-name)))
+    (with-current-buffer (ide-backend-mode-buffer)
+      (ide-backend-mode-update-file
+       (file-relative-name filename default-directory)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Process filters and sentinel
@@ -244,62 +252,71 @@ directory."
 ;; Commands
 
 (defun ide-backend-mode-update-file (filepath)
-  (ide-backend-mode-enqueue
-   `((request . "updateSession")
-     (update . (,(ide-backend-mode-list->hashtable
-                  `((update . "updateSourceFileFromFile")
-                    (filePath . ,filepath))))))
-   nil
-   (lambda (_ reply)
-     (cond
-      ((assoc 'progress reply)
-       (let ((msg (cdr (assoc 'parsedMsg (assoc 'progress reply))))
-             (step (cdr (assoc 'step (assoc 'progress reply))))
-             (steps (cdr (assoc 'numSteps (assoc 'progress reply)))))
-         (message "%s %s"
-                  (propertize msg 'face 'bold)
-                  (propertize (format "(%d of %d)" step steps)
-                              'face 'font-lock-comment-face)))
-       t)
-      (t
-       (ide-backend-mode-enqueue
-        `((request . "getSourceErrors"))
-        nil
-        (lambda (_ reply)
-          (let ((any-errors nil)
-                (warnings 0))
-            (loop for item in (mapcar #'identity (cdr (assoc 'errors reply)))
-                  do (let* ((msg (cdr (assoc 'msg item)))
-                            (kind (cdr (assoc 'kind item)))
-                            (span (cdr (assoc 'span item)))
-                            (fp (cdr (assoc 'filePath span)))
-                            (sl (cdr (assoc 'fromLine span)))
-                            (sc (cdr (assoc 'fromColumn span)))
-                            (el (cdr (assoc 'toLine span)))
-                            (ec (cdr (assoc 'toColumn span))))
-                       (cond ((string= kind "error")
-                              (setq any-errors t))
-                             ((string= kind "warning")
-                              (setq warnings (1+ warnings))))
-                       (message "%s"
-                                (propertize
-                                 (format "%s:(%d,%d)-(%d,%d): \n%s"
-                                         fp sl sc el ec msg)
-                                 'face
-                                 (cond
-                                  ((string= kind "warning")
-                                   'compilation-warning)
-                                  ((string= kind "error")
-                                   'compilation-error)
-                                  (t nil))))))
-            (unless any-errors
-              (if (= 0 warnings)
-                  (message "OK.")
-                (message (propertize "OK (%d warning%s)." 'face 'compilation-warning)
-                         warnings
-                         (if (= 1 warnings) "" "s")))))
-          nil))
-       nil)))))
+  "Load the given filepath."
+  (with-current-buffer (ide-backend-mode-buffer)
+    (ide-backend-mode-enqueue
+     `((request . "updateSession")
+       (update . (,(ide-backend-mode-list->hashtable
+                    `((update . "updateSourceFileFromFile")
+                      (filePath . ,filepath))))))
+     nil
+     'ide-backend-mode-loading-callback)))
+
+(defun ide-backend-mode-loading-callback (_ reply)
+  "Callback for when loading modules."
+  (cond
+   ((assoc 'progress reply)
+    (let ((msg (cdr (assoc 'parsedMsg (assoc 'progress reply))))
+          (step (cdr (assoc 'step (assoc 'progress reply))))
+          (steps (cdr (assoc 'numSteps (assoc 'progress reply)))))
+      (message "%s %s"
+               (propertize msg 'face 'bold)
+               (propertize (format "(%d of %d)" step steps)
+                           'face 'font-lock-comment-face)))
+    t)
+   (t
+    (ide-backend-mode-enqueue
+     `((request . "getSourceErrors"))
+     nil
+     'ide-backend-mode-get-source-errors-callback)
+    nil)))
+
+(defun ide-backend-mode-get-source-errors-callback (_ reply)
+  "Handle the reply from getting source errors."
+  (let ((any-errors nil)
+        (warnings 0))
+    (cl-loop
+     for item in (mapcar #'identity (cdr (assoc 'errors reply)))
+     do (let* ((msg (cdr (assoc 'msg item)))
+               (kind (cdr (assoc 'kind item)))
+               (span (cdr (assoc 'span item)))
+               (fp (cdr (assoc 'filePath span)))
+               (sl (cdr (assoc 'fromLine span)))
+               (sc (cdr (assoc 'fromColumn span)))
+               (el (cdr (assoc 'toLine span)))
+               (ec (cdr (assoc 'toColumn span))))
+          (cond ((string= kind "error")
+                 (setq any-errors t))
+                ((string= kind "warning")
+                 (setq warnings (1+ warnings))))
+          (message "%s"
+                   (propertize
+                    (format "%s:(%d,%d)-(%d,%d): \n%s"
+                            fp sl sc el ec msg)
+                    'face
+                    (cond
+                     ((string= kind "warning")
+                      'compilation-warning)
+                     ((string= kind "error")
+                      'compilation-error)
+                     (t nil))))))
+    (unless any-errors
+      (if (= 0 warnings)
+          (message "OK.")
+        (message (propertize "OK (%d warning%s)." 'face 'compilation-warning)
+                 warnings
+                 (if (= 1 warnings) "" "s")))))
+  nil)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; JSON helpers
