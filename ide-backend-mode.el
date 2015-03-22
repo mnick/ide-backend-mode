@@ -36,6 +36,7 @@
             (define-key map (kbd "M-.") 'ide-backend-mode-goto)
             (define-key map (kbd "C-c C-k") 'ide-backend-mode-clear)
             (define-key map (kbd "C-c C-t") 'ide-backend-mode-type)
+            (define-key map (kbd "C-c C-l") 'ide-backend-mode-load)
             map))
 
 (define-derived-mode inferior-ide-backend-mode fundamental-mode "Inferior-IDE"
@@ -55,6 +56,12 @@ process.")
 (defcustom ide-backend-mode-proc-path
   "ide-backend-client"
   "Path to the ide-backend-client executable."
+  :type 'string
+  :group 'ide-backend-mode)
+
+(defcustom ide-backend-mode-cmd
+  "empty"
+  "The starting command."
   :type 'string
   :group 'ide-backend-mode)
 
@@ -88,10 +95,14 @@ the minor mode when it is started, but can be overriden."
     (setq ide-backend-mode-queue (fifo-make))
     (setq ide-backend-mode-current-command nil)
     (setq ide-backend-mode-buffer "")
-    (let ((args (list ide-backend-mode-proc-path
-                      "--path" ide-backend-mode-paths
-                      "--package-db" ide-backend-mode-package-db
-                      "empty")))
+    (let ((args
+           (append
+            (list ide-backend-mode-proc-path
+                  "--path" ide-backend-mode-paths
+                  "--package-db" ide-backend-mode-package-db
+                  ide-backend-mode-cmd)
+            (when (string= ide-backend-mode-cmd "cabal")
+              (list default-directory)))))
       (ide-backend-mode-log "Starting: %s\n"
                             (mapconcat #'identity args " "))
       (let ((process (start-process
@@ -100,7 +111,9 @@ the minor mode when it is started, but can be overriden."
                       ide-backend-mode-proc-path
                       "--path" ide-backend-mode-paths
                       "--package-db" ide-backend-mode-package-db
-                      "empty")))
+                      ide-backend-mode-cmd
+                      (when (string= ide-backend-mode-cmd "cabal")
+                        default-directory))))
         (set-process-sentinel process 'ide-backend-mode-sentinel)
         (set-process-filter process 'ide-backend-mode-filter)))
     (inferior-ide-backend-mode)))
