@@ -224,13 +224,20 @@ the minor mode when it is started, but can be overriden."
                 (ide-backend-mode-log
                  "<- %s"
                  (haskell-fontify-as-mode line 'javascript-mode))
-                (when (let ((ret (condition-case e
-                                     (funcall cont data (json-read-from-string line))
-                                   (error (message "Haskell process command errored with: %S" e)
-                                          t))))
+                (when (let* ((error-msg nil)
+                             (ret (condition-case e
+                                      (funcall cont data (json-read-from-string line))
+                                    (error (setq error-msg e)
+                                           :error))))
                         (ecase ret
                           (:done t)
                           (:continue nil)
+                          (:error
+                           (setq ide-backend-mode-buffer "")
+                           (setq ide-backend-mode-current-command nil)
+                           (setq ide-backend-mode-queue nil)
+                           (error "Command handler error: %S\n\nThe command queue has been cleared."
+                                  error-msg))
                           (t
                            (error "A command handler must return either :done or :continue,
 but it returned: %S
