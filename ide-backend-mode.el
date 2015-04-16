@@ -402,6 +402,28 @@ directory."
                 (toLine     . ,(plist-get span :el))
                 (toColumn   . ,(plist-get span :ec))))))))
 
+(defun ide-backend-mode-autocompletion (prefix)
+  "Display type info of thing at point."
+  (let* ((filename (buffer-file-name))
+         (module-name (haskell-guess-module-name))
+         (points (ide-backend-mode-points)))
+    (let* ((info (ide-backend-mode-get-autocompletion
+                  module-name
+                  (with-current-buffer (ide-backend-mode-buffer)
+                    (file-relative-name filename default-directory))
+                  prefix))
+           (suggestions (mapcar #'identity (cdr (assoc 'completions info)))))
+      suggestions)))
+
+(defun ide-backend-mode-get-autocompletion (module file prefix)
+  "Get autocomplete info of a given prefix."
+  (with-current-buffer (ide-backend-mode-buffer)
+    (ide-backend-mode-call
+     `((request . "getAutocompletion")
+       (module . ,module)
+       (autocomplete . ((filePath . ,file)
+                (prefix . ,prefix)))))))
+
 (defun ide-backend-mode-get-use-sites (module file span)
   "Get all uses of an identifier."
   )
